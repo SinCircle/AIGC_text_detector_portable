@@ -1,0 +1,10 @@
+torch
+transformers
+safetensors
+sentencepiece
+streamlit
+plotly
+pandas
+PyPDF2
+python-docx
+huggingface-hub

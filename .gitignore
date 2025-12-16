@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.env/
+.env.local
+
+# Jupyter and notebooks
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Local data and caches
+.cache/
+
+# Models and large binaries (keep out of GitHub)
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Streamlit cache
+.streamlit/
+
+# Temporary files
+*.tmp
+~$*
