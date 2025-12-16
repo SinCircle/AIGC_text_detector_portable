@@ -383,7 +383,7 @@ def main():
                 elif file_type == "tex":
                     text = extract_chinese_from_tex(uploaded_file)
                     if text:
-                        st.success(f"✓ TeX 中文内容提取完成，提取 {len(text)} 个字符")
+                        st.success(f"✓ TeX 内容提取完成，提取 {len(text)} 个字符")
                 elif file_type == "md":
                     text = extract_text_from_md(uploaded_file)
                     if text:
