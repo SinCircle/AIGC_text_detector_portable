@@ -15,7 +15,7 @@ import io
 
 # 页面配置
 st.set_page_config(
-    page_title="AIGC 中文检测器",
+    page_title="AIGC 检测器",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -571,11 +571,9 @@ def main():
     <div style='text-align: center; color: #888; font-size: 12px;'>
         <p>
         AIGC 检测器 v3.0 | 
-        当前模型: {model_display} | 
-        准确率: 97%+
+        当前模型: {model_display}
         </p>
         <p>
-        📌 提示: 置信度越高，预测越可靠 | 
         ⚠️ 仅供学术研究使用
         </p>
     </div>
