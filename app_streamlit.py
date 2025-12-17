@@ -99,8 +99,108 @@ st.markdown("""
         border-radius: 3px;
         border: 1px solid #ddd;
     }
+    /* 细小的内联编辑按钮：笔图标，极小尺寸 */
+    .stTooltipHoverTarget button {
+        border: none !important;
+        background: transparent !important;
+        padding: 0 3px !important;
+        min-width: 16px !important;
+        min-height: 14px !important;
+        height: 16px !important;
+        font-size: 12px !important;
+        line-height: 1 !important;
+        box-shadow: none !important;
+        margin: 0 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
+
+# Dialog support check
+if hasattr(st, "dialog"):
+    dialog_decorator = st.dialog
+elif hasattr(st, "experimental_dialog"):
+    dialog_decorator = st.experimental_dialog
+else:
+    dialog_decorator = None
+
+def edit_form_content(index, detector: ChineseAIGCDetector = None):
+    """编辑表单内容"""
+    if "results" not in st.session_state or index >= len(st.session_state.results):
+        st.error("数据错误")
+        return
+
+    item = st.session_state.results[index]
+    active_detector = detector or st.session_state.get("detector")
+
+    # 若上次点击了重置，清理输入框状态，再渲染新的默认值
+    reset_flag_key = f"reset_request_{index}"
+    if st.session_state.get(reset_flag_key):
+        st.session_state.pop(reset_flag_key, None)
+        st.session_state.pop(f"edit_area_{index}", None)
+    
+    metric_slot = st.empty()
+    render_ai_metric(metric_slot, item["AI率"])
+    st.text_area("原文显示", value=item.get("原文", item["文本"]), disabled=True, height=100)
+    
+    # Use a key that depends on the index to avoid conflicts, but we need to be careful with state
+    # If we use key, streamlit manages the value.
+    new_text = st.text_area("当前内容", value=item["文本"], height=150, key=f"edit_area_{index}")
+    
+    col1, col2, col3 = st.columns(3)
+    if col1.button("提交", type="primary", key=f"submit_{index}", use_container_width=True):
+        st.session_state.results[index]["文本"] = new_text
+        if active_detector:
+            recalc = active_detector.detect_single(new_text)
+            st.session_state.results[index].update({
+                "AI率": recalc["ai_prob"],
+                "人类率": recalc["human_prob"],
+                "置信度": recalc["confidence"],
+                "预测": recalc["prediction"]
+            })
+        st.session_state.dialog_open = False
+        st.session_state.editing_index = None
+        st.rerun()
+        
+    if col2.button("重算 AI率", key=f"recalc_{index}", use_container_width=True):
+        if active_detector is None:
+            st.error("检测器未加载")
+        else:
+            with st.spinner("正在重算..."):
+                try:
+                    recalc = active_detector.detect_single(new_text)
+                    st.session_state.results[index].update({
+                        "文本": new_text,
+                        "AI率": recalc["ai_prob"],
+                        "人类率": recalc["human_prob"],
+                        "置信度": recalc["confidence"],
+                        "预测": recalc["prediction"]
+                    })
+                    render_ai_metric(metric_slot, recalc["ai_prob"])
+                except Exception as exc:
+                    st.error(f"重算失败: {exc}")
+
+    if col3.button("重置", key=f"reset_{index}", use_container_width=True):
+        if "原文" in item:
+            original = item["原文"]
+            st.session_state.results[index]["文本"] = original
+            st.session_state[reset_flag_key] = True
+            if active_detector:
+                recalc = active_detector.detect_single(original)
+                st.session_state.results[index].update({
+                    "AI率": recalc["ai_prob"],
+                    "人类率": recalc["human_prob"],
+                    "置信度": recalc["confidence"],
+                    "预测": recalc["prediction"]
+                })
+            st.session_state.dialog_open = False
+            st.session_state.editing_index = None
+            st.rerun()
+
+
+if dialog_decorator:
+    @dialog_decorator("编辑内容")
+    def show_edit_dialog(index):
+        edit_form_content(index, st.session_state.get("detector"))
 
 
 @st.cache_resource
@@ -282,6 +382,24 @@ def get_badge_class(ai_prob: float) -> str:
         return "badge-low"
 
 
+def render_ai_metric(slot, ai_prob: float):
+    """在编辑对话框中以红黄绿展示当前 AI 率"""
+    percent = f"{ai_prob*100:.1f}%"
+    if ai_prob > 0.75:
+        color = "#f23535"
+        icon = "🔴 高度疑似 AI"
+    elif ai_prob > 0.5:
+        color = "#ff921e"
+        icon = "🟡 可能 AI"
+    else:
+        color = "#4caf50"
+        icon = "🟢 可能人类"
+    slot.markdown(
+        f"<div style='font-weight:600;font-size:18px;color:{color};'>当前 AI 率：{icon} | {percent}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def format_ai_rate(ai_prob: float, human_prob: float) -> str:
     """格式化 AI 率显示"""
     ai_percent = f"{ai_prob*100:.1f}%"
@@ -343,6 +461,15 @@ def main():
     
     # 加载检测器
     detector = load_detector(language=lang_code)
+    st.session_state.detector = detector
+
+        # 预留查询参数处理（当前未使用）
+    
+    
+    
+    
+    
+    
     
     # 输入区域
     st.subheader("📝 输入文本")
@@ -411,157 +538,216 @@ def main():
     
                 # 检测所有段落
                 progress_bar = st.progress(0)
-                results = []
+                new_results = []
                 
                 for i, para in enumerate(paragraphs):
                     result = detector.detect_single(para)
-                    results.append({
+                    new_results.append({
                         "段落": i + 1,
                         "文本": para,
+                        "原文": para,
                         "AI率": result["ai_prob"],
                         "人类率": result["human_prob"],
                         "置信度": result["confidence"],
                         "预测": result["prediction"]
                     })
                     progress_bar.progress((i + 1) / len(paragraphs))
+                
+                st.session_state.results = new_results
+                st.session_state.editing_index = None
+                st.session_state.dialog_open = False
+
+    # 显示结果 (如果存在)
+    if "results" in st.session_state and st.session_state.results:
+        results = st.session_state.results
+        
+        # 显示图表
+        st.markdown("---")
+        st.subheader("统计")
+        
+        # 计算统计数据
+        total_paragraphs = len(results)
+        high_ai_count = sum(1 for r in results if r["AI率"] > 0.75)
+        medium_and_high_count = sum(1 for r in results if r["AI率"] > 0.5)
+        avg_ai_rate = sum(r["AI率"] for r in results) / total_paragraphs
+        avg_confidence = sum(r["置信度"] for r in results) / total_paragraphs
+        
+        # 显示统计信息
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("总段落数", f"{total_paragraphs}")
+        with col2:
+            st.metric("疑似及以上", f"{medium_and_high_count}")
+        with col3:
+            st.metric("高度疑似", f"{high_ai_count}")
+        with col4:
+            st.metric("平均 AI 率", f"{avg_ai_rate*100:.1f}%")
+        with col5:
+            st.metric("平均置信度", f"{avg_confidence:.3f}")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # 创建一维条形图 - 所有段落在一行，宽度表示字数占比
+        fig = go.Figure()
+        
+        total_chars = sum(len(r["文本"]) for r in results)
+        if total_chars == 0: total_chars = 1
+        
+        # 为每个段落创建一个堆叠条
+        for i, r in enumerate(results):
+            # 颜色根据 AI 率（渐变：绿 -> 橙 -> 红）
+            ai_rate = float(r["AI率"])
+
+            def _lerp(a: int, b: int, t: float) -> int:
+                return int(round(a + (b - a) * t))
+
+            def _hex_to_rgb(hex_color: str):
+                hex_color = hex_color.lstrip("#")
+                return int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+
+            def _rgb_to_hex(rgb):
+                return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+            def _ai_rate_to_color(p: float) -> str:
+                p = max(0.0, min(1.0, p))
+                c0 = "#4caf50"  # 低：绿
+                c1 = "#ff921e"  # 中：橙
+                c2 = "#f23535"  # 高：红
+                # 分段规则（按百分比）：
+                # 0~20 纯绿；20~50 变橙；50~60 纯橙；60~90 变红；90~100 纯红
+                # 10~20 未指定，默认保持纯绿（与 0~10 一致）
+                if p <= 0.20:
+                    return c0
+                if p <= 0.50:
+                    t = (p - 0.20) / 0.30
+                    r0, g0, b0 = _hex_to_rgb(c0)
+                    r1, g1, b1 = _hex_to_rgb(c1)
+                    return _rgb_to_hex((_lerp(r0, r1, t), _lerp(g0, g1, t), _lerp(b0, b1, t)))
+                if p <= 0.60:
+                    return c1
+                if p <= 0.90:
+                    t = (p - 0.60) / 0.30
+                    r1, g1, b1 = _hex_to_rgb(c1)
+                    r2, g2, b2 = _hex_to_rgb(c2)
+                    return _rgb_to_hex((_lerp(r1, r2, t), _lerp(g1, g2, t), _lerp(b1, b2, t)))
+                return c2
+
+            color = _ai_rate_to_color(ai_rate)
             
-            # 显示图表
-            if len(results) > 0:
-                st.markdown("---")
-                st.subheader("统计")
-                
-                # 计算统计数据
-                total_paragraphs = len(results)
-                high_ai_count = sum(1 for r in results if r["AI率"] > 0.75)
-                medium_and_high_count = sum(1 for r in results if r["AI率"] > 0.5)
-                avg_ai_rate = sum(r["AI率"] for r in results) / total_paragraphs
-                avg_confidence = sum(r["置信度"] for r in results) / total_paragraphs
-                
-                # 显示统计信息
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1:
-                    st.metric("总段落数", f"{total_paragraphs}")
-                with col2:
-                    st.metric("疑似及以上", f"{medium_and_high_count}")
-                with col3:
-                    st.metric("高度疑似", f"{high_ai_count}")
-                with col4:
-                    st.metric("平均 AI 率", f"{avg_ai_rate*100:.1f}%")
-                with col5:
-                    st.metric("平均置信度", f"{avg_confidence:.3f}")
-                
-                st.markdown("<br>", unsafe_allow_html=True)
-                
-                # 创建一维条形图 - 所有段落在一行，宽度表示字数占比
-                fig = go.Figure()
-                
-                total_chars = sum(len(r["文本"]) for r in results)
-                
-                # 为每个段落创建一个堆叠条
-                for i, r in enumerate(results):
-                    # 颜色根据 AI 率（渐变：绿 -> 橙 -> 红）
-                    ai_rate = float(r["AI率"])
-
-                    def _lerp(a: int, b: int, t: float) -> int:
-                        return int(round(a + (b - a) * t))
-
-                    def _hex_to_rgb(hex_color: str):
-                        hex_color = hex_color.lstrip("#")
-                        return int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-
-                    def _rgb_to_hex(rgb):
-                        return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-                    def _ai_rate_to_color(p: float) -> str:
-                        p = max(0.0, min(1.0, p))
-                        c0 = "#4caf50"  # 低：绿
-                        c1 = "#ff921e"  # 中：橙
-                        c2 = "#f23535"  # 高：红
-                        # 分段规则（按百分比）：
-                        # 0~20 纯绿；20~50 变橙；50~60 纯橙；60~90 变红；90~100 纯红
-                        # 10~20 未指定，默认保持纯绿（与 0~10 一致）
-                        if p <= 0.20:
-                            return c0
-                        if p <= 0.50:
-                            t = (p - 0.20) / 0.30
-                            r0, g0, b0 = _hex_to_rgb(c0)
-                            r1, g1, b1 = _hex_to_rgb(c1)
-                            return _rgb_to_hex((_lerp(r0, r1, t), _lerp(g0, g1, t), _lerp(b0, b1, t)))
-                        if p <= 0.60:
-                            return c1
-                        if p <= 0.90:
-                            t = (p - 0.60) / 0.30
-                            r1, g1, b1 = _hex_to_rgb(c1)
-                            r2, g2, b2 = _hex_to_rgb(c2)
-                            return _rgb_to_hex((_lerp(r1, r2, t), _lerp(g1, g2, t), _lerp(b1, b2, t)))
-                        return c2
-
-                    color = _ai_rate_to_color(ai_rate)
-                    
-                    # 宽度根据字数占比
-                    width = len(r["文本"]) / total_chars * 100
-                    
-                    fig.add_trace(go.Bar(
-                        name=f"段落 {r['段落']}",
-                        x=[width],
-                        y=["全文"],
-                        orientation='h',
-                        marker=dict(
-                            color=color,
-                            line=dict(width=0)
-                        ),
-                        hovertemplate=f"<b>段落 {r['段落']}</b><br>字数: {len(r['文本'])}<br>AI率: {r['AI率']*100:.1f}%<extra></extra>"
-                    ))
-                
-                fig.update_layout(
-                    title="概览",
-                    xaxis=dict(
-                        title="",
-                        showticklabels=False,
-                        showgrid=False
-                    ),
-                    yaxis=dict(
-                        showticklabels=False,
-                        showgrid=False
-                    ),
-                    barmode='stack',
-                    height=150,
-                    showlegend=False,
-                    margin=dict(l=0, r=0, t=40, b=20)
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
+            # 宽度根据字数占比
+            width = len(r["文本"]) / total_chars * 100
             
-                # 段落视图
-                st.markdown("---")
-                st.subheader("📄 段落视图")
-                
-                # 显示所有段落
-                for result in results:
+            fig.add_trace(go.Bar(
+                name=f"段落 {r['段落']}",
+                x=[width],
+                y=["全文"],
+                orientation='h',
+                marker=dict(
+                    color=color,
+                    line=dict(width=0)
+                ),
+                hovertemplate=f"<b>段落 {r['段落']}</b><br>字数: {len(r['文本'])}<br>AI率: {r['AI率']*100:.1f}%<extra></extra>"
+            ))
+        
+        fig.update_layout(
+            title="概览",
+            xaxis=dict(
+                title="",
+                showticklabels=False,
+                showgrid=False
+            ),
+            yaxis=dict(
+                showticklabels=False,
+                showgrid=False
+            ),
+            barmode='stack',
+            height=150,
+            showlegend=False,
+            margin=dict(l=0, r=0, t=40, b=20)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+    
+        # 段落视图
+        st.markdown("---")
+        st.subheader("📄 段落视图")
+
+        edit_mode_enabled = st.session_state.get("edit_mode_enabled", False)
+        toggle_col = st.columns(1)
+        with toggle_col[0]:
+            if not edit_mode_enabled:
+                if st.button("启用编辑", use_container_width=True):
+                    st.session_state.edit_mode_enabled = True
+                    st.rerun()
+            else:
+                if st.button("关闭编辑", use_container_width=True):
+                    st.session_state.edit_mode_enabled = False
+                    st.session_state.editing_index = None
+                    st.session_state.dialog_open = False
+                    st.rerun()
+ 
+        # 如果对话框需要保持打开，根据状态重新展示
+        if edit_mode_enabled and dialog_decorator and st.session_state.get("dialog_open") and st.session_state.get("editing_index") is not None:
+            show_edit_dialog(st.session_state.editing_index)
+        
+        # Fallback edit area if no dialog support
+        if edit_mode_enabled and not dialog_decorator and "editing_index" in st.session_state:
+            idx = st.session_state.editing_index
+            if idx is not None and 0 <= idx < len(results):
+                with st.container():
+                    st.info(f"正在编辑段落 {idx+1}")
+                    edit_form_content(idx, st.session_state.get("detector"))
+                    if st.button("关闭编辑", key="close_edit"):
+                        del st.session_state.editing_index
+                        st.rerun()
+
+        # 显示所有段落，尾部小笔按钮触发编辑
+        for i, result in enumerate(results):
+            with st.container():
+                col_text, col_btn = st.columns([0.985, 0.05])
+                with col_text:
                     display_paragraph_result(result["段落"], result["文本"], {
                         "ai_prob": result["AI率"],
                         "human_prob": result["人类率"],
                         "confidence": result["置信度"]
                     })
+                with col_btn:
+                    if edit_mode_enabled and st.button("✎", key=f"btn_edit_{i} edit-btn-small", help="编辑此段落", use_container_width=True):
+                        st.session_state.editing_index = i
+                        if dialog_decorator:
+                            st.session_state.dialog_open = True
+                        st.rerun()
+        
+        # 显示导出按钮
+        st.markdown("---")
                 
-                # 显示导出按钮
-                st.markdown("---")
-                
-                # 导出为 CSV
-                csv_data = pd.DataFrame(results)
-                csv_data["AI率"] = csv_data["AI率"].apply(lambda x: f"{x*100:.1f}%")
-                csv_data["人类率"] = csv_data["人类率"].apply(lambda x: f"{x*100:.1f}%")
-                
-                csv = csv_data.to_csv(index=False)
-                
-                st.download_button(
-                    label="📥 下载检测结果 (CSV)",
-                    data=csv,
-                    file_name="detection_results.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+        # 导出为 CSV
+        csv_data = pd.DataFrame(results)
+        csv_data["AI率"] = csv_data["AI率"].apply(lambda x: f"{x*100:.1f}%")
+        csv_data["人类率"] = csv_data["人类率"].apply(lambda x: f"{x*100:.1f}%")
+        
+        csv = csv_data.to_csv(index=False)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="📥 下载检测结果 (CSV)",
+                data=csv,
+                file_name="detection_results.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+        with col2:
+            # 下载已编辑后的整篇文本
+            edited_full_text = "\n\n".join(r["文本"] for r in results)
+            st.download_button(
+                label="📄 下载已编辑文本",
+                data=edited_full_text,
+                file_name="edited_text.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
     
     
     # 页脚信息
