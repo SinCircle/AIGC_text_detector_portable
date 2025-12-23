@@ -355,8 +355,8 @@ def split_into_paragraphs(text: str) -> List[str]:
     Returns:
         段落列表
     """
-    # 按空行或多个句号分割
-    paragraphs = re.split(r'[\n\n]+|(?<=[。！？])\s+', text.strip())
+    # 按空行
+    paragraphs = re.split(r'[\n\n]', text.strip())
     # 过滤空段落
     paragraphs = [p.strip() for p in paragraphs if p.strip()]
     return paragraphs
@@ -768,3 +768,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
