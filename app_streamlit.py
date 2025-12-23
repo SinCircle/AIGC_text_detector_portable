@@ -270,6 +270,25 @@ def extract_chinese_from_tex(file) -> str:
         # 2) 去\cite引用
         content = re.sub(r"\\cite\{[^}]*\}", " ", content)
 
+        # 处理 itemize / enumerate：把每个 \item 的内容连接成单独一段（段内不保留换行）
+        def _join_items(match):
+            body = match.group(2)
+            # 按 \item 分割并清理每项
+            parts = re.split(r"\\item", body)
+            items = []
+            for p in parts:
+                p = p.strip()
+                if not p:
+                    continue
+                # 去掉内部多余空白和换行，保留内容连续性
+                p = re.sub(r"\s+", " ", p)
+                items.append(p)
+            # 用空格连接所有 item，形成一段
+            return " ".join(items)
+
+        content = re.sub(r"\\begin\{(itemize|enumerate)\}(.*?)\\end\{\1\}", _join_items, content, flags=re.S)
+
+
         # 3) 去数学公式 (行间/行内)
         math_patterns = [r"\$\$.*?\$\$", r"\\\[.*?\\\]", r"\\\(.*?\\\)", r"\$.*?\$"]
         for pat in math_patterns:
@@ -768,4 +787,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
