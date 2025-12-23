@@ -285,7 +285,7 @@ def extract_chinese_from_tex(file) -> str:
         content = content.replace("{", "").replace("}", "")
 
         # 7) 保留中文、英文、数字、常见标点与换行/空白
-        allowed = r"[^\u4e00-\u9fffA-Za-z0-9。，！？、；：：（）《》【】""''…—\-\n\r\t ,.;:!\?\(\)\[\]\{\}/'\"`]"
+        allowed = r"[^\u4e00-\u9fffA-Za-z0-9。，！？、；：：（）《》【】“”""''…—\-\n\r\t ,.;:!\?\(\)\[\]\{\}/'\"`]"
         content = re.sub(allowed, " ", content)
 
         # 8) 规范空白，保留段落
@@ -493,7 +493,7 @@ def main():
     else:
         uploaded_file = st.file_uploader(
             "上传文件 (支持 txt, csv, pdf, docx, tex, md)",
-            type=["txt", "csv", "pdf", "docx", "doc", "tex", "md"]
+            type=["txt", "csv", "pdf", "docx", "tex", "md"]
         )
         if uploaded_file:
             file_type = uploaded_file.name.split(".")[-1].lower()
@@ -567,9 +567,12 @@ def main():
         
         # 计算统计数据
         total_paragraphs = len(results)
+        total_chars = sum(len(r["文本"]) for r in results)
+        if total_chars == 0:
+            total_chars = 1
         high_ai_count = sum(1 for r in results if r["AI率"] > 0.75)
         medium_and_high_count = sum(1 for r in results if r["AI率"] > 0.5)
-        avg_ai_rate = sum(r["AI率"] for r in results) / total_paragraphs
+        avg_ai_rate = sum(r["AI率"] * len(r["文本"]) for r in results) / total_chars
         avg_confidence = sum(r["置信度"] for r in results) / total_paragraphs
         
         # 显示统计信息
@@ -589,9 +592,6 @@ def main():
         
         # 创建一维条形图 - 所有段落在一行，宽度表示字数占比
         fig = go.Figure()
-        
-        total_chars = sum(len(r["文本"]) for r in results)
-        if total_chars == 0: total_chars = 1
         
         # 为每个段落创建一个堆叠条
         for i, r in enumerate(results):
