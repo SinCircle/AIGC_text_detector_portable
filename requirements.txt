@@ -8,3 +8,4 @@ pandas
 PyPDF2
 python-docx
 huggingface-hub
+jieba
