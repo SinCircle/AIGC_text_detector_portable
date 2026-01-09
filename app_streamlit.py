@@ -9,6 +9,7 @@ from advanced_detector import ChineseAIGCDetector
 import plotly.graph_objects as go
 from typing import List, Dict, Tuple
 import re
+import html
 import PyPDF2
 from docx import Document
 import io
@@ -145,15 +146,21 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
 
     item = st.session_state.results[index]
     active_detector = detector or st.session_state.get("detector")
+    
+    # 临时结果 key (用于重算但不提交的情况)
+    temp_result_key = f"temp_result_{index}"
+    display_item = st.session_state.get(temp_result_key, item)
 
     # 若上次点击了重置，清理输入框状态，再渲染新的默认值
     reset_flag_key = f"reset_request_{index}"
     if st.session_state.get(reset_flag_key):
         st.session_state.pop(reset_flag_key, None)
         st.session_state.pop(f"edit_area_{index}", None)
+        st.session_state.pop(temp_result_key, None) # 清除临时结果
+        display_item = item # 回退到原始结果
     
     metric_slot = st.empty()
-    render_ai_metric(metric_slot, item["AI率"])
+    render_ai_metric(metric_slot, display_item["AI率"])
     
     # Original Text (Always Visible)
     st.text_area("原文显示", value=item.get("原文", item["文本"]), disabled=True, height=100)
@@ -161,24 +168,37 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
     # Contribution View (Inserted between Original and Current if calculated)
     contrib_key = f"contrib_results_{index}"
     if contrib_key in st.session_state:
-        html = generate_contribution_html(st.session_state[contrib_key])
-        st.markdown(html, unsafe_allow_html=True)
+        html_content = generate_contribution_html(st.session_state[contrib_key])
+        st.markdown(html_content, unsafe_allow_html=True)
     
     # Use a key that depends on the index to avoid conflicts, but we need to be careful with state
     # If we use key, streamlit manages the value.
-    new_text = st.text_area("当前内容", value=item["文本"], height=150, key=f"edit_area_{index}")
+    new_text = st.text_area("当前内容", value=display_item["文本"], height=150, key=f"edit_area_{index}")
     
     col1, col2, col3, col4 = st.columns(4)
     if col1.button("提交", type="primary", key=f"submit_{index}", use_container_width=True):
         st.session_state.results[index]["文本"] = new_text
         if active_detector:
-            recalc = active_detector.detect_single(new_text)
-            st.session_state.results[index].update({
-                "AI率": recalc["ai_prob"],
-                "人类率": recalc["human_prob"],
-                "置信度": recalc["confidence"],
-                "预测": recalc["prediction"]
-            })
+            # 检查是否有临时结果且文本一致，若是则直接使用
+            if temp_result_key in st.session_state and st.session_state[temp_result_key]["文本"] == new_text:
+                recalc = st.session_state[temp_result_key]
+                st.session_state.results[index].update({
+                    "AI率": recalc["AI率"],
+                    "人类率": recalc["人类率"],
+                    "置信度": recalc["置信度"],
+                    "预测": recalc["预测"]
+                })
+            else:
+                recalc = active_detector.detect_single(new_text)
+                st.session_state.results[index].update({
+                    "AI率": recalc["ai_prob"],
+                    "人类率": recalc["human_prob"],
+                    "置信度": recalc["confidence"],
+                    "预测": recalc["prediction"]
+                })
+        
+        # 清理状态
+        st.session_state.pop(temp_result_key, None)
         st.session_state.dialog_open = False
         st.session_state.editing_index = None
         if contrib_key in st.session_state:
@@ -192,14 +212,18 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
             with st.spinner("正在重算..."):
                 try:
                     recalc = active_detector.detect_single(new_text)
-                    st.session_state.results[index].update({
+                    # 仅更新临时结果，不修改 item
+                    new_temp = item.copy()
+                    new_temp.update({
                         "文本": new_text,
                         "AI率": recalc["ai_prob"],
                         "人类率": recalc["human_prob"],
                         "置信度": recalc["confidence"],
                         "预测": recalc["prediction"]
                     })
-                    render_ai_metric(metric_slot, recalc["ai_prob"])
+                    st.session_state[temp_result_key] = new_temp
+                    # 强制刷新以更新 metric_slot 和 text_area 的 source
+                    st.rerun()
                 except Exception as exc:
                     st.error(f"重算失败: {exc}")
 
@@ -444,7 +468,7 @@ def generate_contribution_html(results: List[Dict]) -> str:
 
     html_parts = []
     for result in sorted_results:
-        segment = result["文本"]
+        segment = html.escape(result["文本"])
         contribution = float(result["贡献度"])
 
         color = None
