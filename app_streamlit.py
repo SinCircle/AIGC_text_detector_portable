@@ -7,11 +7,14 @@ import streamlit as st
 import pandas as pd
 from advanced_detector import ChineseAIGCDetector
 import plotly.graph_objects as go
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import re
 import PyPDF2
 from docx import Document
 import io
+import jieba
+import numpy as np
+from collections import defaultdict
 
 # 页面配置
 st.set_page_config(
@@ -37,6 +40,17 @@ st.markdown("""
         transition: all 0.2s ease;
     }
     .text-segment:hover {
+        opacity: 0.85;
+        cursor: pointer;
+    }
+    .char-segment {
+        display: inline;
+        padding: 2px 0;
+        line-height: 1.8;
+        transition: all 0.2s ease;
+        position: relative;
+    }
+    .char-segment:hover {
         opacity: 0.85;
         cursor: pointer;
     }
@@ -140,13 +154,21 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
     
     metric_slot = st.empty()
     render_ai_metric(metric_slot, item["AI率"])
+    
+    # Original Text (Always Visible)
     st.text_area("原文显示", value=item.get("原文", item["文本"]), disabled=True, height=100)
+    
+    # Contribution View (Inserted between Original and Current if calculated)
+    contrib_key = f"contrib_results_{index}"
+    if contrib_key in st.session_state:
+        html = generate_contribution_html(st.session_state[contrib_key])
+        st.markdown(html, unsafe_allow_html=True)
     
     # Use a key that depends on the index to avoid conflicts, but we need to be careful with state
     # If we use key, streamlit manages the value.
     new_text = st.text_area("当前内容", value=item["文本"], height=150, key=f"edit_area_{index}")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     if col1.button("提交", type="primary", key=f"submit_{index}", use_container_width=True):
         st.session_state.results[index]["文本"] = new_text
         if active_detector:
@@ -159,6 +181,8 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
             })
         st.session_state.dialog_open = False
         st.session_state.editing_index = None
+        if contrib_key in st.session_state:
+            del st.session_state[contrib_key]
         st.rerun()
         
     if col2.button("重算 AI率", key=f"recalc_{index}", use_container_width=True):
@@ -179,7 +203,22 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
                 except Exception as exc:
                     st.error(f"重算失败: {exc}")
 
-    if col3.button("重置", key=f"reset_{index}", use_container_width=True):
+    if col3.button("计算分布", key=f"calc_dist_{index}", use_container_width=True):
+        if active_detector is None:
+            st.error("检测器未加载")
+        elif not new_text.strip():
+            st.error("内容为空")
+        else:
+            lang = st.session_state.get("language_code", "chinese")
+            mode = "word"
+            segments = segment_text(new_text, mode=mode, language=lang)
+            sentences = split_into_sentences(new_text, language=lang)
+            
+            dist_results = analyze_contribution_systematic(active_detector, new_text, segments, sentences, language=lang)
+            st.session_state[contrib_key] = dist_results
+            st.rerun()
+
+    if col4.button("重置", key=f"reset_{index}", use_container_width=True):
         if "原文" in item:
             original = item["原文"]
             st.session_state.results[index]["文本"] = original
@@ -194,6 +233,8 @@ def edit_form_content(index, detector: ChineseAIGCDetector = None):
                 })
             st.session_state.dialog_open = False
             st.session_state.editing_index = None
+            if contrib_key in st.session_state:
+                del st.session_state[contrib_key]
             st.rerun()
 
 
@@ -209,6 +250,227 @@ def load_detector(language="chinese"):
     with st.spinner("正在加载模型..."):
         detector = ChineseAIGCDetector(device="cpu", language=language)
     return detector
+
+
+def split_into_sentences(text: str, language: str = "chinese") -> List[Tuple[str, int, int]]:
+    """将文本分割成句子"""
+    sentences = []
+    if language == "chinese":
+        pattern = r'[^。！？；!?;]+[。！？；!?;]*'
+        for match in re.finditer(pattern, text):
+            sentence = match.group().strip()
+            if sentence:
+                sentences.append((sentence, match.start(), match.end()))
+    else:
+        pattern = r'[^.!?]+[.!?]*'
+        for match in re.finditer(pattern, text):
+            sentence = match.group().strip()
+            if sentence:
+                sentences.append((sentence, match.start(), match.end()))
+    if not sentences:
+        sentences = [(text.strip(), 0, len(text))]
+    return sentences
+
+def segment_text(text: str, mode: str, language: str = "chinese") -> List[Tuple[str, int, int]]:
+    """分词/分字"""
+    segments = []
+    if mode == "char":
+        for i, char in enumerate(text):
+            if char.strip():
+                segments.append((char, i, i+1))
+    else:
+        if language == "chinese":
+            words = jieba.tokenize(text)
+            for word, start, end in words:
+                if word.strip():
+                    segments.append((word, start, end))
+        else:
+            pattern = r'\b\w+\b|[^\w\s]'
+            for match in re.finditer(pattern, text):
+                word = match.group()
+                if word.strip():
+                    segments.append((word, match.start(), match.end()))
+    return segments
+
+def analyze_contribution_systematic(detector: ChineseAIGCDetector, text: str, 
+                                   segments: List[Tuple[str, int, int]],
+                                   sentences: List[Tuple[str, int, int]],
+                                   language: str = "chinese") -> List[Dict]:
+    """系统性滑动窗口分析"""
+    original_result = detector.detect_single(text)
+    original_ai_prob = original_result["ai_prob"]
+    stats = defaultdict(lambda: {"present": [], "absent": []})
+    
+    # Progress UI placeholders
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    window_ratios = [1/4, 1/24]
+    total_iterations = 0
+    for sentence_text, sent_start, sent_end in sentences:
+        sent_segments = [seg for seg in segments if seg[1] >= sent_start and seg[2] <= sent_end]
+        if sent_segments:
+            sent_len = len(sent_segments)
+            for ratio in window_ratios:
+                window_size = max(1, int(sent_len * ratio))
+                num_positions = sent_len + window_size - 1
+                total_iterations += num_positions
+    
+    current_iteration = 0
+    
+    for sent_idx, (sentence_text, sent_start, sent_end) in enumerate(sentences):
+        sent_segment_info = []
+        for global_idx, seg in enumerate(segments):
+            if seg[1] >= sent_start and seg[2] <= sent_end:
+                sent_segment_info.append((global_idx, seg))
+        
+        if not sent_segment_info:
+            continue
+        
+        sent_segments_count = len(sent_segment_info)
+        sent_result = detector.detect_single(sentence_text)
+        sent_original_ai_prob = sent_result["ai_prob"]
+    
+        for ratio in window_ratios:
+            window_size = max(1, int(sent_segments_count * ratio))
+            for start_pos in range(-(window_size - 1), sent_segments_count):
+                window_start = max(0, start_pos)
+                window_end = min(sent_segments_count, start_pos + window_size)
+                if window_start >= window_end:
+                    continue
+                
+                deleted_local_indices = set(range(window_start, window_end))
+                sent_text_parts = []
+                for local_idx, (global_idx, seg) in enumerate(sent_segment_info):
+                    if local_idx not in deleted_local_indices:
+                        sent_text_parts.append(seg[0])
+                
+                modified_sent_text = ''.join(sent_text_parts)
+                if modified_sent_text.strip():
+                    try:
+                        modified_result = detector.detect_single(modified_sent_text)
+                        modified_ai_prob = modified_result["ai_prob"]
+                    except:
+                        modified_ai_prob = sent_original_ai_prob
+                else:
+                    modified_ai_prob = 0
+                
+                for local_idx, (global_idx, seg) in enumerate(sent_segment_info):
+                    if local_idx in deleted_local_indices:
+                        stats[global_idx]["absent"].append(modified_ai_prob)
+                    else:
+                        stats[global_idx]["present"].append(modified_ai_prob)
+                
+                current_iteration += 1
+                if total_iterations > 0:
+                    progress_bar.progress(current_iteration / total_iterations)
+
+    progress_bar.empty()
+    status_text.empty()
+    
+    results = []
+    for idx, (segment, start, end) in enumerate(segments):
+        present_probs = stats[idx]["present"]
+        absent_probs = stats[idx]["absent"]
+        
+        if len(present_probs) > 5:
+            present_sorted = sorted(present_probs)
+            avg_present = np.mean(present_sorted[1:-1]) if len(present_sorted) > 2 else np.mean(present_probs)
+        else:
+            avg_present = np.mean(present_probs) if present_probs else original_ai_prob
+            
+        if len(absent_probs) > 5:
+            absent_sorted = sorted(absent_probs)
+            avg_absent = np.mean(absent_sorted[1:-1]) if len(absent_sorted) > 2 else np.mean(absent_probs)
+        else:
+            avg_absent = np.mean(absent_probs) if absent_probs else original_ai_prob
+        
+        contribution = avg_present - avg_absent
+        results.append({
+            "文本": segment,
+            "起始位置": start,
+            "贡献度": contribution,
+            "存在时AI": avg_present,
+            "缺失时AI": avg_absent
+        })
+    return results
+
+def _lerp(a: int, b: int, t: float) -> int:
+    return int(round(a + (b - a) * t))
+
+def _hex_to_rgb(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    return int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+
+def _rgb_to_hex(rgb):
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+def get_contribution_color(contribution: float) -> str:
+    normalized = (contribution + 0.1) / 0.2
+    normalized = max(0.0, min(1.0, normalized))
+    c0 = "#4caf50" 
+    c1 = "#ff921e" 
+    c2 = "#f23535" 
+    if normalized <= 0.20: return c0
+    elif normalized <= 0.50:
+        t = (normalized - 0.20) / 0.30
+        r0, g0, b0 = _hex_to_rgb(c0)
+        r1, g1, b1 = _hex_to_rgb(c1)
+        return _rgb_to_hex((_lerp(r0, r1, t), _lerp(g0, g1, t), _lerp(b0, b1, t)))
+    elif normalized <= 0.60: return c1
+    elif normalized <= 0.90:
+        t = (normalized - 0.60) / 0.30
+        r1, g1, b1 = _hex_to_rgb(c1)
+        r2, g2, b2 = _hex_to_rgb(c2)
+        return _rgb_to_hex((_lerp(r1, r2, t), _lerp(g1, g2, t), _lerp(b1, b2, t)))
+    else: return c2
+
+def generate_contribution_html(results: List[Dict]) -> str:
+    sorted_results = sorted(results, key=lambda x: x["起始位置"])
+
+    # 计算当前段落的最大正向贡献值，用于相对缩放
+    positive_contribs = [r["贡献度"] for r in results if r.get("贡献度", 0) > 0]
+    max_contrib = max(positive_contribs) if positive_contribs else 0.001
+
+    # 连续渐变：橙 -> 红（按相对贡献 ratio 线性插值）
+    c_low = "#ff921e"   # low highlight (orange)
+    c_high = "#f23535"  # high highlight (red)
+
+    def _ratio_to_color(ratio: float) -> str:
+        ratio = max(0.0, min(1.0, ratio))
+        r0, g0, b0 = _hex_to_rgb(c_low)
+        r1, g1, b1 = _hex_to_rgb(c_high)
+        return _rgb_to_hex((_lerp(r0, r1, ratio), _lerp(g0, g1, ratio), _lerp(b0, b1, ratio)))
+
+    html_parts = []
+    for result in sorted_results:
+        segment = result["文本"]
+        contribution = float(result["贡献度"])
+
+        color = None
+
+        # 仅处理正向贡献（忽略负向）
+        if contribution > 0:
+            ratio = contribution / max_contrib if max_contrib > 0 else 0.0
+
+            # 绝对阈值 + 相对阈值：过滤噪音，但颜色在阈值以上连续渐变
+            if contribution > 0.01 and ratio > 0.10:
+                # 将 (0.10 ~ 1.0) 映射到 (0 ~ 1) 做连续渐变
+                t = (ratio - 0.10) / 0.90
+                color = _ratio_to_color(t)
+
+        tooltip = f"字/词: {segment} | 贡献: {contribution*100:.2f}%"
+
+        if color:
+            html_parts.append(
+                f'<span class="char-segment" style="border-bottom: 3px solid {color}; background-color: {color}25;" title="{tooltip}">{segment}</span>'
+            )
+        else:
+            html_parts.append(
+                f'<span class="char-segment" title="{tooltip}">{segment}</span>'
+            )
+
+    return ''.join(html_parts)
 
 
 def extract_text_from_pdf(file) -> str:
@@ -481,6 +743,7 @@ def main():
     # 加载检测器
     detector = load_detector(language=lang_code)
     st.session_state.detector = detector
+    st.session_state.language_code = lang_code
 
         # 预留查询参数处理（当前未使用）
     
